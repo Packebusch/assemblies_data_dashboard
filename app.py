@@ -52,8 +52,8 @@ def record_api_call():
         st.session_state.api_calls = []
     st.session_state.api_calls.append(datetime.now())
 
-@st.cache_data
 def load_df(path: str):
+    # Don't cache this function to avoid DataFrame hashing issues
     df = pd.read_json(path, lines=True)
     for c in ["state_name", "political_level", "policy_area"]:
         if c in df:
@@ -93,14 +93,14 @@ except Exception:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 @st.cache_data(show_spinner=False)
-def build_index(df_in: pd.DataFrame):
-    if OPENAI_API_KEY is None or df_in.empty or "recommendation_text" not in df_in:
+def build_index_from_texts(texts: list, rec_ids: list):
+    """Build embeddings index from text list, using rec_ids as cache key"""
+    if OPENAI_API_KEY is None or not texts:
         return None, None
     
     # Note: This function is cached, so embeddings are only built once per dataset
     # Rate limiting is applied to the chat function instead
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    texts = (df_in["recommendation_text"].fillna("").astype(str)).tolist()
     vecs = []
     for i in range(0, len(texts), 200):
         batch = texts[i:i+200]
@@ -111,6 +111,23 @@ def build_index(df_in: pd.DataFrame):
     M = np.array(vecs, dtype=np.float32)
     norms = np.linalg.norm(M, axis=1, keepdims=True) + 1e-9
     M = M / norms
+    return M
+
+def build_index(df_in: pd.DataFrame):
+    """Wrapper function to handle DataFrame caching issues"""
+    if OPENAI_API_KEY is None or df_in.empty or "recommendation_text" not in df_in:
+        return None, None
+    
+    # Extract texts and rec_ids for caching
+    texts = (df_in["recommendation_text"].fillna("").astype(str)).tolist()
+    rec_ids = df_in["rec_id"].tolist() if "rec_id" in df_in.columns else list(range(len(texts)))
+    
+    # Get cached embeddings
+    M = build_index_from_texts(texts, rec_ids)
+    if M is None:
+        return None, None
+    
+    # Return embeddings with original DataFrame (no caching issues)
     return M, df_in.reset_index(drop=True)
 
 emb_matrix, df_ix = build_index(df)
