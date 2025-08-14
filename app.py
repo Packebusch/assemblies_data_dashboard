@@ -3,6 +3,8 @@ import streamlit as st
 import plotly.express as px
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 import hashlib
+import numpy as np
+import openai
 
 import os, io, requests
 DATA = os.getenv("DATA_PATH", "data/recommendations.ndjson")
@@ -42,10 +44,39 @@ def load_df(path: str):
 
 df = load_df(DATA)
 
+# Secrets-aware OpenAI config (for Streamlit Cloud)
+OPENAI_API_KEY = (st.secrets.get("OPENAI_API_KEY") if hasattr(st, 'secrets') else None) or os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = (st.secrets.get("OPENAI_MODEL") if hasattr(st, 'secrets') else None) or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+@st.cache_data(show_spinner=False)
+def build_index(df_in: pd.DataFrame):
+    if OPENAI_API_KEY is None or df_in.empty or "recommendation_text" not in df_in:
+        return None, None
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    texts = (df_in["recommendation_text"].fillna("").astype(str)).tolist()
+    vecs = []
+    for i in range(0, len(texts), 200):
+        batch = texts[i:i+200]
+        resp = client.embeddings.create(model="text-embedding-3-small", input=batch)
+        vecs.extend([d.embedding for d in resp.data])
+    if not vecs:
+        return None, None
+    M = np.array(vecs, dtype=np.float32)
+    norms = np.linalg.norm(M, axis=1, keepdims=True) + 1e-9
+    M = M / norms
+    return M, df_in.reset_index(drop=True)
+
+emb_matrix, df_ix = build_index(df)
+
 with st.sidebar:
     st.header("Filter")
     states = st.multiselect("Bundesland", sorted(df.get("state_name", pd.Series()).dropna().unique()))
     levels = st.multiselect("Ebene", sorted(df.get("political_level", pd.Series()).dropna().unique()))
+    # Assembly filter (by title)
+    assemblies = st.multiselect(
+        "Assembly (Titel)",
+        sorted(df.get("assembly_title", pd.Series()).dropna().unique())
+    )
     # Year range filter with guard if only a single year exists
     if "start_year" in df and df["start_year"].notna().any():
         y_min, y_max = int(df["start_year"].min()), int(df["start_year"].max())
@@ -71,6 +102,8 @@ if states:
     f = f[f["state_name"].isin(states)]
 if levels:
     f = f[f["political_level"].isin(levels)]
+if assemblies:
+    f = f[f["assembly_title"].isin(assemblies)]
 if "start_year" in f:
     f = f[(f["start_year"] >= years[0]) & (f["start_year"] <= years[1])]
 if query:
@@ -174,3 +207,70 @@ def show_detail_dialog():
             st.markdown(f"[Assembly-Seite]({row.get('source_page_url')})")
 
 # (Removed alternate detail sections to rely on modal from main table)
+
+# --- Floating chat overlay ---
+@st.dialog("Chat mit den Empfehlungen")
+def show_chat_dialog():
+    if OPENAI_API_KEY is None:
+        st.info("Setze OPENAI_API_KEY in Secrets, um die Konversation zu aktivieren.")
+        return
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    for role, content in st.session_state.chat_history:
+        with st.chat_message(role):
+            st.write(content)
+    user_q = st.chat_input("Frage zu den Empfehlungen stellen…", key="chat_input_dialog")
+    if not user_q:
+        return
+    with st.chat_message("user"):
+        st.write(user_q)
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    contexts = []
+    if emb_matrix is not None and df_ix is not None and len(emb_matrix) == len(df_ix):
+        q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
+        q = np.array(q_emb, dtype=np.float32)
+        q = q / (np.linalg.norm(q) + 1e-9)
+        sims = (emb_matrix @ q).astype(np.float32)
+        idxs = sims.argsort()[-5:][::-1]
+        for i in idxs:
+            row = df_ix.iloc[int(i)]
+            ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Quelle: {row.get('file_url','')}\n"
+            contexts.append(ctx)
+    prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
+
+Kontexte:
+{chr(10).join(contexts)}
+
+Aufgabe:
+1) Antworte prägnant auf die Frage.
+2) Danach gib unter der Überschrift 'Originale Empfehlungstexte' die wörtlichen Empfehlungstexte der von dir genutzten Kontexte wieder – jeweils als kurzes Blockzitat in Anführungszeichen, zusammen mit Assembly (Titel, Bundesland) und Quelle (URL).
+
+Frage: {user_q}
+Antwort (mit Quellenangaben und 'Originale Empfehlungstexte'):"""
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.1,
+            messages=[
+                {"role":"system","content":"Du bist ein präziser Analyst. Antworte kurz, sachlich, mit Quellen aus dem Kontext."},
+                {"role":"user","content": prompt}
+            ]
+        )
+        answer = resp.choices[0].message.content.strip()
+    except Exception as e:
+        answer = f"Fehler beim Abruf: {e}"
+    with st.chat_message("assistant"):
+        st.write(answer)
+    st.session_state.chat_history.append(("user", user_q))
+    st.session_state.chat_history.append(("assistant", answer))
+
+st.markdown(
+    """
+    <style>
+    .floating-chat-btn { position: fixed; bottom: 24px; right: 24px; z-index: 1000; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+if st.button("💬 Chat", key="open_chat_btn", help="Chat mit den Empfehlungen öffnen"):
+    show_chat_dialog()
