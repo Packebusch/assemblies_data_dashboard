@@ -45,8 +45,12 @@ def load_df(path: str):
 df = load_df(DATA)
 
 # Secrets-aware OpenAI config (for Streamlit Cloud)
-OPENAI_API_KEY = (st.secrets.get("OPENAI_API_KEY") if hasattr(st, 'secrets') else None) or os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = (st.secrets.get("OPENAI_MODEL") if hasattr(st, 'secrets') else None) or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+try:
+    OPENAI_API_KEY = (st.secrets.get("OPENAI_API_KEY") if hasattr(st, 'secrets') and hasattr(st.secrets, 'get') else None) or os.getenv("OPENAI_API_KEY")
+    OPENAI_MODEL = (st.secrets.get("OPENAI_MODEL") if hasattr(st, 'secrets') and hasattr(st.secrets, 'get') else None) or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+except Exception:
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 @st.cache_data(show_spinner=False)
 def build_index(df_in: pd.DataFrame):

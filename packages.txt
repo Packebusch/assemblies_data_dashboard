@@ -1,0 +1,4 @@
+# System packages required for the app
+# Add any system-level dependencies here if needed
+# For example:
+# libgomp1
