@@ -6,7 +6,9 @@ A Streamlit web application for visualizing and exploring recommendations from c
 
 - Interactive data filtering and visualization
 - Full-text search capabilities
-- AI-powered chat interface for exploring recommendations
+- AI-powered chat interface for exploring recommendations with **rate limiting**
+  - 20 requests per hour per user
+  - 3 requests per minute per user
 - Detailed views of assembly recommendations
 - Export functionality
 

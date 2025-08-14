@@ -5,12 +5,52 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 import hashlib
 import numpy as np
 import openai
+import time
+from datetime import datetime, timedelta
 
 import os, io, requests
 DATA = os.getenv("DATA_PATH", "data/recommendations.ndjson")
 
 st.set_page_config(page_title="Bürgerräte – Empfehlungen", layout="wide")
 st.title("Bürgerräte – Empfehlungen (Ergebnisse)")
+
+# Rate limiting configuration
+MAX_REQUESTS_PER_HOUR = 50  # Maximum API calls per hour per user
+MAX_REQUESTS_PER_MINUTE = 10  # Maximum API calls per minute per user
+
+def check_rate_limit():
+    """Check if user has exceeded rate limits. Returns (allowed, message)"""
+    now = datetime.now()
+    
+    # Initialize rate limiting in session state
+    if "api_calls" not in st.session_state:
+        st.session_state.api_calls = []
+    
+    # Clean old entries (older than 1 hour)
+    st.session_state.api_calls = [
+        call_time for call_time in st.session_state.api_calls 
+        if now - call_time < timedelta(hours=1)
+    ]
+    
+    # Check hourly limit
+    if len(st.session_state.api_calls) >= MAX_REQUESTS_PER_HOUR:
+        return False, f"Stündliches Limit erreicht ({MAX_REQUESTS_PER_HOUR} Anfragen/Stunde). Versuche es später erneut."
+    
+    # Check minute limit
+    recent_calls = [
+        call_time for call_time in st.session_state.api_calls 
+        if now - call_time < timedelta(minutes=1)
+    ]
+    if len(recent_calls) >= MAX_REQUESTS_PER_MINUTE:
+        return False, f"Zu viele Anfragen. Warte bitte eine Minute ({MAX_REQUESTS_PER_MINUTE} Anfragen/Minute)."
+    
+    return True, ""
+
+def record_api_call():
+    """Record an API call timestamp"""
+    if "api_calls" not in st.session_state:
+        st.session_state.api_calls = []
+    st.session_state.api_calls.append(datetime.now())
 
 @st.cache_data
 def load_df(path: str):
@@ -56,6 +96,9 @@ except Exception:
 def build_index(df_in: pd.DataFrame):
     if OPENAI_API_KEY is None or df_in.empty or "recommendation_text" not in df_in:
         return None, None
+    
+    # Note: This function is cached, so embeddings are only built once per dataset
+    # Rate limiting is applied to the chat function instead
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     texts = (df_in["recommendation_text"].fillna("").astype(str)).tolist()
     vecs = []
@@ -218,6 +261,17 @@ def show_chat_dialog():
     if OPENAI_API_KEY is None:
         st.info("Setze OPENAI_API_KEY in Secrets, um die Konversation zu aktivieren.")
         return
+    
+    # Display rate limit status
+    if "api_calls" in st.session_state:
+        now = datetime.now()
+        recent_calls = [
+            call_time for call_time in st.session_state.api_calls 
+            if now - call_time < timedelta(hours=1)
+        ]
+        remaining = MAX_REQUESTS_PER_HOUR - len(recent_calls)
+        st.caption(f"Verbleibende API-Anfragen diese Stunde: {remaining}/{MAX_REQUESTS_PER_HOUR}")
+    
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     for role, content in st.session_state.chat_history:
@@ -226,20 +280,36 @@ def show_chat_dialog():
     user_q = st.chat_input("Frage zu den Empfehlungen stellen…", key="chat_input_dialog")
     if not user_q:
         return
+    
+    # Check rate limit before processing
+    allowed, rate_limit_msg = check_rate_limit()
+    if not allowed:
+        st.error(rate_limit_msg)
+        return
+    
     with st.chat_message("user"):
         st.write(user_q)
+    
+    # Record API call for rate limiting
+    record_api_call()
+    
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     contexts = []
     if emb_matrix is not None and df_ix is not None and len(emb_matrix) == len(df_ix):
-        q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
-        q = np.array(q_emb, dtype=np.float32)
-        q = q / (np.linalg.norm(q) + 1e-9)
-        sims = (emb_matrix @ q).astype(np.float32)
-        idxs = sims.argsort()[-5:][::-1]
-        for i in idxs:
-            row = df_ix.iloc[int(i)]
-            ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Quelle: {row.get('file_url','')}\n"
-            contexts.append(ctx)
+        try:
+            q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
+            q = np.array(q_emb, dtype=np.float32)
+            q = q / (np.linalg.norm(q) + 1e-9)
+            sims = (emb_matrix @ q).astype(np.float32)
+            idxs = sims.argsort()[-5:][::-1]
+            for i in idxs:
+                row = df_ix.iloc[int(i)]
+                ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Quelle: {row.get('file_url','')}\n"
+                contexts.append(ctx)
+        except Exception as e:
+            st.error(f"Fehler bei der Suche: {e}")
+            return
+    
     prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
 
 Kontexte:
