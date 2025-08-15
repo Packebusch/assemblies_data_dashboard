@@ -273,7 +273,7 @@ def show_detail_dialog():
 # (Removed alternate detail sections to rely on modal from main table)
 
 # --- Floating chat overlay ---
-@st.dialog("Chat mit den Empfehlungen")
+@st.dialog("Chat mit den Empfehlungen", width="large")
 def show_chat_dialog():
     if OPENAI_API_KEY is None:
         st.info("Setze OPENAI_API_KEY in Secrets, um die Konversation zu aktivieren.")
