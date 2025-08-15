@@ -310,77 +310,81 @@ def show_chat_dialog():
     # Record API call for rate limiting
     record_api_call()
     
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    contexts = []
-    if emb_matrix is not None and df_ix is not None and len(emb_matrix) == len(df_ix):
-        try:
-            q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
-            q = np.array(q_emb, dtype=np.float32)
-            q = q / (np.linalg.norm(q) + 1e-9)
-            sims = (emb_matrix @ q).astype(np.float32)
-            
-            # Get all results sorted by similarity (highest first)
-            # Filter for relevant results (similarity > threshold)
-            similarity_threshold = 0.1  # Adjust this threshold as needed
-            relevant_indices = np.where(sims > similarity_threshold)[0]
-            
-            if len(relevant_indices) > 0:
-                # Sort by similarity (highest first)
-                sorted_indices = relevant_indices[sims[relevant_indices].argsort()[::-1]]
+    # Show loading animation while processing
+    with st.spinner("🔍 Suche relevante Empfehlungen..."):
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        contexts = []
+        if emb_matrix is not None and df_ix is not None and len(emb_matrix) == len(df_ix):
+            try:
+                q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
+                q = np.array(q_emb, dtype=np.float32)
+                q = q / (np.linalg.norm(q) + 1e-9)
+                sims = (emb_matrix @ q).astype(np.float32)
                 
-                for i in sorted_indices:
-                    row = df_ix.iloc[int(i)]
-                    similarity_score = sims[i]
-                    ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
-                    contexts.append(ctx)
-            else:
-                # If no results above threshold, take top 10 results anyway
-                idxs = sims.argsort()[-10:][::-1]
-                for i in idxs:
-                    row = df_ix.iloc[int(i)]
-                    similarity_score = sims[i]
-                    ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
-                    contexts.append(ctx)
-        except Exception as e:
-            st.error(f"Fehler bei der Suche: {e}")
-            return
+                # Get all results sorted by similarity (highest first)
+                # Filter for relevant results (similarity > threshold)
+                similarity_threshold = 0.1  # Adjust this threshold as needed
+                relevant_indices = np.where(sims > similarity_threshold)[0]
+                
+                if len(relevant_indices) > 0:
+                    # Sort by similarity (highest first)
+                    sorted_indices = relevant_indices[sims[relevant_indices].argsort()[::-1]]
+                    
+                    for i in sorted_indices:
+                        row = df_ix.iloc[int(i)]
+                        similarity_score = sims[i]
+                        ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
+                        contexts.append(ctx)
+                else:
+                    # If no results above threshold, take top 10 results anyway
+                    idxs = sims.argsort()[-10:][::-1]
+                    for i in idxs:
+                        row = df_ix.iloc[int(i)]
+                        similarity_score = sims[i]
+                        ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
+                        contexts.append(ctx)
+            except Exception as e:
+                st.error(f"Fehler bei der Suche: {e}")
+                return
     
-    # Intelligent context truncation to stay within token limits
-    # Adjust based on model capabilities
-    model_context_limits = {
-        "gpt-4o-mini": 100000,      # 128k tokens - conservative
-        "gpt-4o": 500000,           # 512k tokens - much larger
-        "gpt-4-turbo": 500000,      # 512k tokens  
-        "gpt-4": 100000,            # 128k tokens
-        "gpt-4.1": 800000,          # 1M tokens - huge context
-        "gpt-5": 200000             # 256k tokens
-    }
-    
-    max_context_length = model_context_limits.get(OPENAI_MODEL, 100000)
-    context_text = chr(10).join(contexts)
-    
-    # If contexts are too long, truncate intelligently
-    if len(context_text) > max_context_length:
-        # Take first N contexts that fit within limit
-        truncated_contexts = []
-        current_length = 0
-        context_count = 0
+    # Show second loading phase for AI analysis
+    with st.spinner("🤖 Analysiere Empfehlungen und erstelle Antwort..."):
+        # Intelligent context truncation to stay within token limits
+        # Adjust based on model capabilities
+        model_context_limits = {
+            "gpt-4o-mini": 100000,      # 128k tokens - conservative
+            "gpt-4o": 500000,           # 512k tokens - much larger
+            "gpt-4-turbo": 500000,      # 512k tokens  
+            "gpt-4": 100000,            # 128k tokens
+            "gpt-4.1": 800000,          # 1M tokens - huge context
+            "gpt-5": 200000             # 256k tokens
+        }
         
-        for ctx in contexts:
-            if current_length + len(ctx) > max_context_length:
-                break
-            truncated_contexts.append(ctx)
-            current_length += len(ctx)
-            context_count += 1
+        max_context_length = model_context_limits.get(OPENAI_MODEL, 100000)
+        context_text = chr(10).join(contexts)
         
-        context_text = chr(10).join(truncated_contexts)
-        total_results = len(contexts)
+        # If contexts are too long, truncate intelligently
+        if len(context_text) > max_context_length:
+            # Take first N contexts that fit within limit
+            truncated_contexts = []
+            current_length = 0
+            context_count = 0
+            
+            for ctx in contexts:
+                if current_length + len(ctx) > max_context_length:
+                    break
+                truncated_contexts.append(ctx)
+                current_length += len(ctx)
+                context_count += 1
+            
+            context_text = chr(10).join(truncated_contexts)
+            total_results = len(contexts)
+            
+            # Add info about truncation
+            truncation_info = f"\n\n[Hinweis: {context_count} von {total_results} relevanten Empfehlungen werden angezeigt. Die Ergebnisse sind nach Relevanz sortiert.]"
+            context_text += truncation_info
         
-        # Add info about truncation
-        truncation_info = f"\n\n[Hinweis: {context_count} von {total_results} relevanten Empfehlungen werden angezeigt. Die Ergebnisse sind nach Relevanz sortiert.]"
-        context_text += truncation_info
-    
-    prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
+        prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
 
 Kontexte:
 {context_text}
@@ -391,24 +395,25 @@ Aufgabe:
 
 Frage: {user_q}
 Antwort (mit Quellenangaben und 'Originale Empfehlungstexte'):"""
-    try:
-        # Some models (like GPT-5) only support default temperature
-        model_params = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {"role":"system","content":"Du bist ein präziser Analyst. Antworte kurz, sachlich, mit Quellen aus dem Kontext."},
-                {"role":"user","content": prompt}
-            ]
-        }
-        
-        # Only add temperature for models that support it
-        if OPENAI_MODEL not in ["gpt-5"]:
-            model_params["temperature"] = 0.1
+        try:
+            # Some models (like GPT-5) only support default temperature
+            model_params = {
+                "model": OPENAI_MODEL,
+                "messages": [
+                    {"role":"system","content":"Du bist ein präziser Analyst. Antworte kurz, sachlich, mit Quellen aus dem Kontext."},
+                    {"role":"user","content": prompt}
+                ]
+            }
             
-        resp = client.chat.completions.create(**model_params)
-        answer = resp.choices[0].message.content.strip()
-    except Exception as e:
-        answer = f"Fehler beim Abruf: {e}"
+            # Only add temperature for models that support it
+            if OPENAI_MODEL not in ["gpt-5"]:
+                model_params["temperature"] = 0.1
+                
+            resp = client.chat.completions.create(**model_params)
+            answer = resp.choices[0].message.content.strip()
+        except Exception as e:
+            answer = f"Fehler beim Abruf: {e}"
+    
     with st.chat_message("assistant"):
         st.write(answer)
     st.session_state.chat_history.append(("user", user_q))
