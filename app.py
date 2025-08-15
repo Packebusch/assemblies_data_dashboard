@@ -15,8 +15,8 @@ st.set_page_config(page_title="Bürgerräte – Empfehlungen", layout="wide")
 st.title("Bürgerräte – Empfehlungen (Ergebnisse)")
 
 # Rate limiting configuration
-MAX_REQUESTS_PER_HOUR = 50  # Maximum API calls per hour per user
-MAX_REQUESTS_PER_MINUTE = 10  # Maximum API calls per minute per user
+MAX_REQUESTS_PER_HOUR = 100  # Maximum API calls per hour per user
+MAX_REQUESTS_PER_MINUTE = 20  # Maximum API calls per minute per user
 
 def check_rate_limit():
     """Check if user has exceeded rate limits. Returns (allowed, message)"""
@@ -318,11 +318,29 @@ def show_chat_dialog():
             q = np.array(q_emb, dtype=np.float32)
             q = q / (np.linalg.norm(q) + 1e-9)
             sims = (emb_matrix @ q).astype(np.float32)
-            idxs = sims.argsort()[-5:][::-1]
-            for i in idxs:
-                row = df_ix.iloc[int(i)]
-                ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Quelle: {row.get('file_url','')}\n"
-                contexts.append(ctx)
+            
+            # Get all results sorted by similarity (highest first)
+            # Filter for relevant results (similarity > threshold)
+            similarity_threshold = 0.1  # Adjust this threshold as needed
+            relevant_indices = np.where(sims > similarity_threshold)[0]
+            
+            if len(relevant_indices) > 0:
+                # Sort by similarity (highest first)
+                sorted_indices = relevant_indices[sims[relevant_indices].argsort()[::-1]]
+                
+                for i in sorted_indices:
+                    row = df_ix.iloc[int(i)]
+                    similarity_score = sims[i]
+                    ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
+                    contexts.append(ctx)
+            else:
+                # If no results above threshold, take top 10 results anyway
+                idxs = sims.argsort()[-10:][::-1]
+                for i in idxs:
+                    row = df_ix.iloc[int(i)]
+                    similarity_score = sims[i]
+                    ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
+                    contexts.append(ctx)
         except Exception as e:
             st.error(f"Fehler bei der Suche: {e}")
             return
