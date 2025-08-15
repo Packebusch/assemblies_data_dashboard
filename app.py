@@ -87,10 +87,10 @@ df = load_df(DATA)
 # Secrets-aware OpenAI config (for Streamlit Cloud)
 try:
     OPENAI_API_KEY = (st.secrets.get("OPENAI_API_KEY") if hasattr(st, 'secrets') and hasattr(st.secrets, 'get') else None) or os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL = (st.secrets.get("OPENAI_MODEL") if hasattr(st, 'secrets') and hasattr(st.secrets, 'get') else None) or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MODEL = (st.secrets.get("OPENAI_MODEL") if hasattr(st, 'secrets') and hasattr(st.secrets, 'get') else None) or os.getenv("OPENAI_MODEL", "gpt-4o")
 except Exception:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 @st.cache_data(show_spinner=False)
 def build_index_from_texts(texts: list, rec_ids: list):
@@ -345,10 +345,45 @@ def show_chat_dialog():
             st.error(f"Fehler bei der Suche: {e}")
             return
     
+    # Intelligent context truncation to stay within token limits
+    # Adjust based on model capabilities
+    model_context_limits = {
+        "gpt-4o-mini": 100000,      # 128k tokens - conservative
+        "gpt-4o": 500000,           # 512k tokens - much larger
+        "gpt-4-turbo": 500000,      # 512k tokens  
+        "gpt-4": 100000,            # 128k tokens
+        "gpt-4.1": 800000,          # 1M tokens - huge context
+        "gpt-5": 200000             # 256k tokens
+    }
+    
+    max_context_length = model_context_limits.get(OPENAI_MODEL, 100000)
+    context_text = chr(10).join(contexts)
+    
+    # If contexts are too long, truncate intelligently
+    if len(context_text) > max_context_length:
+        # Take first N contexts that fit within limit
+        truncated_contexts = []
+        current_length = 0
+        context_count = 0
+        
+        for ctx in contexts:
+            if current_length + len(ctx) > max_context_length:
+                break
+            truncated_contexts.append(ctx)
+            current_length += len(ctx)
+            context_count += 1
+        
+        context_text = chr(10).join(truncated_contexts)
+        total_results = len(contexts)
+        
+        # Add info about truncation
+        truncation_info = f"\n\n[Hinweis: {context_count} von {total_results} relevanten Empfehlungen werden angezeigt. Die Ergebnisse sind nach Relevanz sortiert.]"
+        context_text += truncation_info
+    
     prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
 
 Kontexte:
-{chr(10).join(contexts)}
+{context_text}
 
 Aufgabe:
 1) Antworte prägnant auf die Frage.

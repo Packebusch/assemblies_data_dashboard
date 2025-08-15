@@ -26,13 +26,14 @@ This app is designed to run on Streamlit Community Cloud.
 1. **Streamlit Cloud Secrets**: Add your OpenAI API key to the Streamlit Cloud secrets:
    ```toml
    OPENAI_API_KEY = "your-openai-api-key-here"
-   OPENAI_MODEL = "gpt-4o-mini"  # optional, defaults to gpt-4o-mini
+   OPENAI_MODEL = "gpt-4o"  # Recommended for large datasets
+   # Other options: "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1", "gpt-5"
    ```
 
 2. **Local Development**: Set environment variables:
    ```bash
    export OPENAI_API_KEY="your-api-key"
-   export OPENAI_MODEL="gpt-4o-mini"
+   export OPENAI_MODEL="gpt-4o"  # Recommended for comprehensive results
    ```
 
 ### Data
