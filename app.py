@@ -357,7 +357,7 @@ def show_chat_dialog():
             "gpt-4-turbo": 500000,      # 512k tokens  
             "gpt-4": 100000,            # 128k tokens
             "gpt-4.1": 800000,          # 1M tokens - huge context
-            "gpt-5": 200000             # 256k tokens
+            "gpt-5": 50000              # Reduced for stability - GPT-5 seems to struggle with large contexts
         }
         
         max_context_length = model_context_limits.get(OPENAI_MODEL, 100000)
@@ -402,17 +402,42 @@ Antwort (mit Quellenangaben und 'Originale Empfehlungstexte'):"""
                 "messages": [
                     {"role":"system","content":"Du bist ein präziser Analyst. Antworte kurz, sachlich, mit Quellen aus dem Kontext."},
                     {"role":"user","content": prompt}
-                ]
+                ],
+                "timeout": 120  # 2 minute timeout
             }
             
             # Only add temperature for models that support it
             if OPENAI_MODEL not in ["gpt-5"]:
                 model_params["temperature"] = 0.1
-                
+            
+            # Add debug info
+            st.write(f"Debug: Verwende Modell {OPENAI_MODEL}, Context-Größe: {len(context_text):,} Zeichen")
+            
             resp = client.chat.completions.create(**model_params)
             answer = resp.choices[0].message.content.strip()
+            
         except Exception as e:
-            answer = f"Fehler beim Abruf: {e}"
+            error_msg = str(e)
+            st.error(f"API-Fehler mit {OPENAI_MODEL}: {error_msg}")
+            
+            # Fallback to GPT-4o if GPT-5 fails
+            if OPENAI_MODEL == "gpt-5":
+                st.warning("Versuche Fallback zu GPT-4o...")
+                try:
+                    fallback_params = {
+                        "model": "gpt-4o",
+                        "messages": model_params["messages"],
+                        "temperature": 0.1,
+                        "timeout": 60
+                    }
+                    resp = client.chat.completions.create(**fallback_params)
+                    answer = resp.choices[0].message.content.strip()
+                    st.success("Fallback zu GPT-4o erfolgreich!")
+                except Exception as fallback_error:
+                    st.error(f"Auch Fallback fehlgeschlagen: {fallback_error}")
+                    answer = f"Fehler bei beiden Modellen: {error_msg} | Fallback: {fallback_error}"
+            else:
+                answer = f"Fehler beim Abruf: {error_msg}"
     
     with st.chat_message("assistant"):
         st.write(answer)
