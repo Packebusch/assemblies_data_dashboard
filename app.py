@@ -392,14 +392,20 @@ Aufgabe:
 Frage: {user_q}
 Antwort (mit Quellenangaben und 'Originale Empfehlungstexte'):"""
     try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0.1,
-            messages=[
+        # Some models (like GPT-5) only support default temperature
+        model_params = {
+            "model": OPENAI_MODEL,
+            "messages": [
                 {"role":"system","content":"Du bist ein präziser Analyst. Antworte kurz, sachlich, mit Quellen aus dem Kontext."},
                 {"role":"user","content": prompt}
             ]
-        )
+        }
+        
+        # Only add temperature for models that support it
+        if OPENAI_MODEL not in ["gpt-5"]:
+            model_params["temperature"] = 0.1
+            
+        resp = client.chat.completions.create(**model_params)
         answer = resp.choices[0].message.content.strip()
     except Exception as e:
         answer = f"Fehler beim Abruf: {e}"
