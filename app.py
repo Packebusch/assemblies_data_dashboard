@@ -222,7 +222,7 @@ grid = AgGrid(
     allow_unsafe_jscode=True
 )
 sel = grid.get('selected_rows')
-if sel:
+if sel is not None and len(sel) > 0:
     sel_row = sel[0]
     # Try to resolve to full record (prefer rec_id, else match on key fields)
     rid = sel_row.get('rec_id')
