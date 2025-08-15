@@ -310,41 +310,84 @@ def show_chat_dialog():
     # Record API call for rate limiting
     record_api_call()
     
-    # Show loading animation while processing
-    with st.spinner("🔍 Suche relevante Empfehlungen..."):
+    # Two-stage GPT-4o approach: Smart filtering + comprehensive analysis
+    with st.spinner("🔍 Intelligente Empfehlungssuche mit GPT-4o..."):
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        contexts = []
+        
+        # Stage 1: Use GPT-4o to intelligently filter and select relevant recommendations
         if emb_matrix is not None and df_ix is not None and len(emb_matrix) == len(df_ix):
             try:
+                # Get broader set of potentially relevant results
                 q_emb = client.embeddings.create(model="text-embedding-3-small", input=[user_q]).data[0].embedding
                 q = np.array(q_emb, dtype=np.float32)
                 q = q / (np.linalg.norm(q) + 1e-9)
                 sims = (emb_matrix @ q).astype(np.float32)
                 
-                # Get all results sorted by similarity (highest first)
-                # Filter for relevant results (similarity > threshold)
-                similarity_threshold = 0.1  # Adjust this threshold as needed
-                relevant_indices = np.where(sims > similarity_threshold)[0]
+                # Get top 50 results for intelligent filtering
+                top_50_indices = sims.argsort()[-50:][::-1]
+                candidate_recommendations = []
                 
-                if len(relevant_indices) > 0:
-                    # Sort by similarity (highest first)
-                    sorted_indices = relevant_indices[sims[relevant_indices].argsort()[::-1]]
-                    
-                    for i in sorted_indices:
-                        row = df_ix.iloc[int(i)]
-                        similarity_score = sims[i]
-                        ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
+                for i in top_50_indices:
+                    row = df_ix.iloc[int(i)]
+                    candidate_recommendations.append({
+                        'id': i,
+                        'similarity': float(sims[i]),
+                        'text': row.get('recommendation_text', ''),
+                        'assembly': row.get('assembly_title', ''),
+                        'state': row.get('state_name', ''),
+                        'year': row.get('start_year', ''),
+                        'source': row.get('file_url', '')
+                    })
+                
+                # Use GPT-4o to intelligently filter the candidates
+                filtering_prompt = f"""Du bist ein Experte für Bürgerbeteiligung und analysierst Empfehlungen aus Bürgerräten.
+
+AUFGABE: Analysiere die folgenden Empfehlungen und wähle alle aus, die zur Frage "{user_q}" relevant sind.
+
+KANDIDATEN:
+{chr(10).join([f"ID: {r['id']} | Empfehlung: {r['text'][:200]}..." for r in candidate_recommendations[:30]])}
+
+Bitte antworte mit einem JSON-Array der relevanten IDs und einer kurzen Begründung:
+{{
+  "relevant_ids": [1, 5, 12, ...],
+  "reasoning": "Kurze Erklärung der Auswahlkriterien",
+  "total_found": Anzahl_der_relevanten_Empfehlungen
+}}
+
+Sei streng bei der Relevanz - nur wirklich passende Empfehlungen auswählen."""
+
+                filtering_response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": filtering_prompt}],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+                
+                import json
+                filter_result = json.loads(filtering_response.choices[0].message.content)
+                relevant_ids = filter_result.get('relevant_ids', [])
+                
+                st.write(f"🎯 GPT-4o hat {len(relevant_ids)} relevante Empfehlungen identifiziert")
+                st.write(f"📝 Begründung: {filter_result.get('reasoning', 'Keine Begründung')}")
+                
+                # Build contexts from GPT-4o selected recommendations
+                contexts = []
+                for rec_id in relevant_ids:
+                    for candidate in candidate_recommendations:
+                        if candidate['id'] == rec_id:
+                            ctx = f"- Assembly: {candidate['assembly']} ({candidate['state']}, {candidate['year']})\n  Empfehlung: {candidate['text']}\n  Ähnlichkeit: {candidate['similarity']:.3f}\n  Quelle: {candidate['source']}\n"
+                            contexts.append(ctx)
+                            break
+                
+                # If no relevant results found, fallback to top similarity matches
+                if not contexts:
+                    st.warning("GPT-4o fand keine direkt relevanten Empfehlungen. Verwende Ähnlichkeitssuche als Fallback...")
+                    for candidate in candidate_recommendations[:10]:
+                        ctx = f"- Assembly: {candidate['assembly']} ({candidate['state']}, {candidate['year']})\n  Empfehlung: {candidate['text']}\n  Ähnlichkeit: {candidate['similarity']:.3f}\n  Quelle: {candidate['source']}\n"
                         contexts.append(ctx)
-                else:
-                    # If no results above threshold, take top 10 results anyway
-                    idxs = sims.argsort()[-10:][::-1]
-                    for i in idxs:
-                        row = df_ix.iloc[int(i)]
-                        similarity_score = sims[i]
-                        ctx = f"- Assembly: {row.get('assembly_title','')} ({row.get('state_name','')}, {row.get('start_year','')})\n  Empfehlung: {row.get('recommendation_text','')}\n  Ähnlichkeit: {similarity_score:.3f}\n  Quelle: {row.get('file_url','')}\n"
-                        contexts.append(ctx)
+                        
             except Exception as e:
-                st.error(f"Fehler bei der Suche: {e}")
+                st.error(f"Fehler bei der intelligenten Suche: {e}")
                 return
     
     # Show second loading phase for AI analysis
@@ -384,17 +427,45 @@ def show_chat_dialog():
             truncation_info = f"\n\n[Hinweis: {context_count} von {total_results} relevanten Empfehlungen werden angezeigt. Die Ergebnisse sind nach Relevanz sortiert.]"
             context_text += truncation_info
         
-        prompt = f"""Du beantwortest Fragen NUR auf Basis der folgenden Kontexte. Antworte auf Deutsch und füge kurze Quellenangaben an.
+        # Advanced GPT-4o analysis with structured reasoning
+        prompt = f"""Du bist ein Experte für demokratische Partizipation und Bürgerbeteiligung. Analysiere die folgenden Empfehlungen aus deutschen Bürgerräten systematisch.
 
-Kontexte:
+FRAGE: {user_q}
+
+VERFÜGBARE EMPFEHLUNGEN:
 {context_text}
 
-Aufgabe:
-1) Antworte prägnant auf die Frage.
-2) Danach gib unter der Überschrift 'Originale Empfehlungstexte' die wörtlichen Empfehlungstexte der von dir genutzten Kontexte wieder – jeweils als kurzes Blockzitat in Anführungszeichen, zusammen mit Assembly (Titel, Bundesland) und Quelle (URL).
+AUFGABE - Erstelle eine umfassende, strukturierte Analyse:
 
-Frage: {user_q}
-Antwort (mit Quellenangaben und 'Originale Empfehlungstexte'):"""
+## 1. ZUSAMMENFASSUNG
+Kurze Übersicht der wichtigsten Erkenntnisse zu "{user_q}"
+
+## 2. THEMATISCHE ANALYSE
+- **Hauptthemen**: Welche Aspekte werden am häufigsten behandelt?
+- **Regionale Unterschiede**: Gibt es geografische Muster?
+- **Zeitliche Entwicklung**: Wie haben sich die Empfehlungen über die Jahre entwickelt?
+
+## 3. KATEGORISIERTE EMPFEHLUNGEN
+Gruppiere die Empfehlungen nach Themen/Ansätzen:
+
+### Kategorie A: [Name]
+- Empfehlung 1 (Assembly, Bundesland, Jahr)
+- Empfehlung 2 (Assembly, Bundesland, Jahr)
+
+### Kategorie B: [Name]
+- ...
+
+## 4. KONKRETE MASSNAHMEN
+Liste alle konkreten, umsetzungsreifen Vorschläge auf
+
+## 5. ÜBERGREIFENDE MUSTER
+Welche wiederkehrenden Prinzipien oder Ansätze zeigen sich?
+
+## 6. QUELLENVERZEICHNIS
+Vollständige Liste aller zitierten Empfehlungen mit:
+- "Originaltext" (Assembly-Name, Bundesland, Jahr) - [URL]
+
+Sei gründlich, analytisch und nutze alle verfügbaren Informationen."""
         try:
             # Some models (like GPT-5) only support default temperature
             model_params = {
